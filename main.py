@@ -1,10 +1,12 @@
 from os import getenv
 from fastapi import FastAPI, HTTPException, Depends, status
 from sqlmodel import SQLModel, select, create_engine, Field, Session
+from sqlmodel import Relationship
 from typing import Optional, List, Annotated, Dict
 from dotenv import load_dotenv
 from urllib.parse import unquote
 from pydantic import ValidationError
+from sqlalchemy.orm import selectinload
 
 
 from usefulapi import UsefulAPI
@@ -26,13 +28,19 @@ class ProductBase(SQLModel):
     description: Optional[str] = None
     price: float = Field(gt=0)
     content: str
+    category_id: Optional[int] = Field(default=None, foreign_key="categories.id") # Внешний ключ, нужен для сверения айди(наверное)
+
+    
 
 class Product(ProductBase, table=True):
     __tablename__ = "products"
-    id: int = Field(default=None, primary_key=True)
+    id: Optional[int] = Field(default=None, primary_key=True)
+
+    category: Optional["Category"] = Relationship(back_populates="products") # Отношение между продуктом и категорией, нужно только для разработчика, в ответе не показывается
 
 class ProductGet(ProductBase):
     id: int
+    category: Optional[str] = None
 
 class ProductAdd(ProductBase):
     pass
@@ -41,6 +49,25 @@ class ProductSet(ProductBase):
     name: Optional[str] = None
     price: Optional[float] = None
     content: Optional[str] = None
+
+
+class CategoryBase(SQLModel):
+    name: str
+
+class Category(CategoryBase, table=True):
+    __tablename__ = "categories"
+    id: int = Field(default=None, primary_key=True)
+
+    products: List["Product"] = Relationship(back_populates="category")
+
+class CategoryGet(CategoryBase):
+    id: int
+
+class CategoryAdd(CategoryBase):
+    pass
+
+class CategorySet(CategoryBase):
+    name: Optional[str] = None
 
 app = FastAPI()
 
@@ -72,15 +99,22 @@ def get_products(db: db_annotation, params: url_params):
                                     params["sort"],
                                     fields,
                                     params["page"],
-                                    params["limit"])
+                                    params["limit"]).options(selectinload(Product.category))
     data = db.exec(statement).all()
-    return data
+    result = []
+    for product in data:
+        temp = dict(**product.model_dump())
+        temp["category"] = product.category.name
+        result.append(temp)
+    return result
 
 @app.get("/products/{id}", response_model=ProductGet)
 def get_product(db: db_annotation, id: int):
     data = db.get(Product, id)
     if data:
-        return data
+        result = dict(**data.model_dump())
+        result["category"] = data.category.name
+        return result
     else:
         raise HTTPException(detail=f"Wrong id {id}, nothing here", status_code=status.HTTP_404_NOT_FOUND)
 
@@ -126,3 +160,63 @@ def delete_product(id: int, db: db_annotation):
         return id
     else:
         raise HTTPException(detail=f"Product {id} not found!", status_code=status.HTTP_404_NOT_FOUND)
+
+
+@app.get("/categories", response_model=List[CategoryGet])
+def get_categories(db: db_annotation, params: url_params):
+    fields = ["id", "name"]
+    statement = select(Category)
+    statement = UsefulAPI.all_in_one(statement,
+                                    Category,
+                                    params["filter"],
+                                    params["sort"],
+                                    fields,
+                                    params["page"],
+                                    params["limit"])
+    data = db.exec(statement).all()
+    return data
+
+@app.get("/categories/{id}", response_model=CategoryGet)
+def get_category(db: db_annotation, id: int):
+    data = db.get(Category, id)
+    if data:
+        return data
+    raise HTTPException(detail=f"Category {id} not found!", status_code=status.HTTP_404_NOT_FOUND)
+
+@app.put("/categories/{id}", response_model=CategoryGet)
+def set_category(db: db_annotation, id: int, value: CategorySet):
+    data = db.get(Category, id)
+    if data:
+        for _k, _i in value.model_dump().items():
+            setattr(data, _k, _i)
+        db.add(data)
+        db.commit()
+        db.refresh(data)
+        return data
+    try:
+        data = CategoryAdd(**value.model_dump())
+        data = Category(**data.model_dump())
+        db.add(data)
+        db.commit()
+        db.refresh(data)
+        return data
+    except ValidationError as e:
+        raise HTTPException(detail=f"an error found with request, detail={e}", status_code=status.HTTP_422_UNPROCESSABLE_CONTENT)
+    db.rollback()
+
+@app.post("/categories", response_model=CategoryGet)
+def add_category(db: db_annotation, value: CategoryAdd):
+    data = Category(**value.model_dump())
+    db.add(data)
+    db.commit()
+    db.refresh(data)
+    return data
+
+@app.delete("/categories/{id}")
+def delete_category(db: db_annotation, id: int):
+    data = db.get(Category, id)
+    if data:
+        db.delete(data)
+        db.commit()
+        return id
+    raise HTTPException(detail=f"Category {id} not found", status_code=status.HTTP_404_NOT_FOUND)
