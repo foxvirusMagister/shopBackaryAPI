@@ -148,7 +148,7 @@ url_params = Annotated[Dict[str, str | int], Depends(get_params)]
 
 @app.get("/products", response_model=List[ProductGet])
 def get_products(db: db_annotation, params: url_params):
-    fields = ["id", "name", "description", "price", "content"]
+    fields = ["id", "name", "description", "price", "content", "category_id"]
     statement = select(Product)
     statement = UsefulAPI.all_in_one(statement, Product,
                                     params["filter"],
@@ -233,6 +233,14 @@ def get_categories(db: db_annotation, params: url_params):
     data = db.exec(statement).all()
     return data
 
+@app.get("/categories/used", response_model=List[CategoryGet])
+def get_used_categories(db: db_annotation, p: url_params):
+    fields = ["id", "name"]
+    statement = select(Category).where(Category.id == Product.category_id).distinct()
+    statement = UsefulAPI.all_in_one(statement, Category, p["filter"], p["sort"], fields, p["page"], p["limit"]).options(selectinload(Category.products))
+    data = db.exec(statement).all()
+    return data
+
 @app.get("/categories/{id}", response_model=CategoryGet)
 def get_category(db: db_annotation, id: int):
     data = db.get(Category, id)
@@ -314,11 +322,13 @@ def add_user(db: db_annotation, value: UserAdd):
             raise HTTPException(detail="Error: name of user is repeating!", status_code=status.HTTP_422_UNPROCESSABLE_CONTENT)
     db.rollback()
 
-@app.post("/users")
+@app.post("/chpass")
 def checkPassword(db: db_annotation, value: UsersPassword):
     names = value.model_dump()
     statement = select(User).where(User.name == names["username"])
     data = db.exec(statement).first()
-    data = data.model_dump()
-    if bcrypt.checkpw(names["password"], data["password_hash"]):
-        return True
+    if data:
+        data = data.model_dump()
+        if bcrypt.checkpw(names["password"].encode(), data["password_hash"].encode()):
+            return True
+    return False
