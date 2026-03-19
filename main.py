@@ -7,6 +7,10 @@ from dotenv import load_dotenv
 from urllib.parse import unquote
 from pydantic import ValidationError
 from sqlalchemy.orm import selectinload
+import bcrypt
+from sqlalchemy.exc import IntegrityError
+from psycopg2.errors import UniqueViolation
+from pydantic import BaseModel
 
 
 from usefulapi import UsefulAPI
@@ -68,6 +72,58 @@ class CategoryAdd(CategoryBase):
 
 class CategorySet(CategoryBase):
     name: Optional[str] = None
+
+
+class UserBase(SQLModel):
+    name: str
+    role_id: int = Field(default=2, foreign_key="roles.id")
+
+class User(UserBase, table=True):
+    __tablename__ = "users"
+    id: int = Field(default=None, primary_key=True)
+    password_hash: str
+
+class UserAdd(UserBase):
+    password_hash: str
+
+class UserGet(UserBase):
+    id: int
+
+class UserSet(UserBase):
+    name: Optional[str] = None
+    role_id: Optional[int] = None
+    password_hash: Optional[str] = None
+
+
+class RoleBase(SQLModel):
+    name: str
+    can_add: Optional[bool] = False
+    can_edit: Optional[bool] = False
+    can_delete: Optional[bool] = False
+    can_buy: Optional[bool] = True
+
+class Role(RoleBase, table=True):
+    __tablename__ = "roles"
+    id: int = Field(default=None, primary_key=True)
+
+class RoleGet(RoleBase):
+    id: int
+
+class RoleAdd(RoleBase):
+    pass
+
+class RoleSet(RoleBase):
+    name: Optional[str] = None
+    can_add: Optional[bool] = None
+    can_edit: Optional[bool] = None
+    can_delete: Optional[bool] = None
+    can_buy: Optional[bool] = None
+
+
+class UsersPassword(BaseModel):
+    username: str
+    password: str
+
 
 app = FastAPI()
 
@@ -133,7 +189,7 @@ def set_product(id: int, value: ProductSet, db: db_annotation):
     data = db.get(Product, id)
     if data:
         for _i, _v in value.model_dump().items():
-            setattr(data, _i, _v)
+            if _v != None: setattr(data, _i, _v)
         db.add(data)
         db.commit()
         db.refresh(data)
@@ -148,6 +204,7 @@ def set_product(id: int, value: ProductSet, db: db_annotation):
                 return data
             db.rollback()
         except ValidationError as e:
+            db.rollback()
             raise HTTPException(detail=f"An error raised detail: {e}", status_code=status.HTTP_422_UNPROCESSABLE_CONTENT)
         db.rollback()
 
@@ -188,7 +245,7 @@ def set_category(db: db_annotation, id: int, value: CategorySet):
     data = db.get(Category, id)
     if data:
         for _k, _i in value.model_dump().items():
-            setattr(data, _k, _i)
+            if _i != None: setattr(data, _k, _i)
         db.add(data)
         db.commit()
         db.refresh(data)
@@ -201,6 +258,7 @@ def set_category(db: db_annotation, id: int, value: CategorySet):
         db.refresh(data)
         return data
     except ValidationError as e:
+        db.rollback()
         raise HTTPException(detail=f"an error found with request, detail={e}", status_code=status.HTTP_422_UNPROCESSABLE_CONTENT)
     db.rollback()
 
@@ -220,3 +278,47 @@ def delete_category(db: db_annotation, id: int):
         db.commit()
         return id
     raise HTTPException(detail=f"Category {id} not found", status_code=status.HTTP_404_NOT_FOUND)
+
+
+@app.get("/users", response_model=List[UserGet])
+def get_users(db: db_annotation, p: url_params):
+    fields = ["id", "name", "role_id"]
+    statement = select(User)
+    statement = UsefulAPI.all_in_one(statement, User, p["filter"], p["sort"], fields, p["page"], p["limit"])
+    data = db.exec(statement).all()
+    return data
+
+@app.get("/users/{id}", response_model=UserGet)
+def get_user(db: db_annotation, id: int):
+    data = db.get(User, id)
+    if data:
+        return data
+    raise HTTPException(detail=f"User {id} not found!", status_code=status.HTTP_404_NOT_FOUND)
+
+@app.post("/users", response_model=UserGet)
+def add_user(db: db_annotation, value: UserAdd):
+    try:
+        data = {**value.model_dump()}
+        passwordandHash = bcrypt.hashpw(data["password_hash"].encode(), bcrypt.gensalt())
+        data["password_hash"] = passwordandHash.decode()
+        data = User(**data)
+        db.add(data)
+        db.commit()
+        db.refresh(data)
+        return data
+    except ValidationError as e:
+        raise HTTPException(detail=f"an error was occured detail:{e}", status_code=status.HTTP_422_UNPROCESSABLE_CONTENT)
+    except IntegrityError as e:
+        if isinstance(e.orig, UniqueViolation):
+            db.rollback()
+            raise HTTPException(detail="Error: name of user is repeating!", status_code=status.HTTP_422_UNPROCESSABLE_CONTENT)
+    db.rollback()
+
+@app.post("/users")
+def checkPassword(db: db_annotation, value: UsersPassword):
+    names = value.model_dump()
+    statement = select(User).where(User.name == names["username"])
+    data = db.exec(statement).first()
+    data = data.model_dump()
+    if bcrypt.checkpw(names["password"], data["password_hash"]):
+        return True
