@@ -1,5 +1,6 @@
 from os import getenv
 from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlmodel import SQLModel, select, create_engine, Field, Session
 from sqlmodel import Relationship
 from typing import Optional, List, Annotated, Dict
@@ -11,6 +12,11 @@ import bcrypt
 from sqlalchemy.exc import IntegrityError
 from psycopg2.errors import UniqueViolation
 from pydantic import BaseModel
+import boto3
+from datetime import datetime, timezone, timedelta
+import jwt
+from jwt.exceptions import InvalidTokenError
+
 
 
 from usefulapi import UsefulAPI
@@ -18,20 +24,41 @@ from usefulapi import UsefulAPI
 
 load_dotenv()
 
+SECRET_KEY = "ebd1e720af063beac77e0dedc9e0749e783a48ddeb79218364ea7030eca5b949"
+
 USERNAME = getenv("USERNAME")
 PASSWORD = getenv("PASSWORD")
 IP = getenv("IP")
 PORT = getenv("PORT", default="5432")
 DBNAME = getenv("DBNAME")
+ADMIN_ROLE = "admin"
+
+oauth_form = OAuth2PasswordBearer(tokenUrl="token")
+
+REGION = getenv("REGION")
+AWS_ACCESS_ID = getenv("AWS_ACCESS_ID")
+AWS_TENANT = getenv("AWS_TENANT")
+AWS_SECRET_ACCESS_KEY = getenv("AWS_SECRET_ACCESS_KEY")
+ENDPOINT_URL = getenv("ENDPOINT_URL")
+BUCKET = getenv("BUCKET")
+
+client = boto3.client("s3",
+                   region_name=REGION,
+                   aws_access_key_id=f"{AWS_TENANT}:{AWS_ACCESS_ID}",
+                   aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+                   endpoint_url=ENDPOINT_URL
+                   )
+
+bucket = BUCKET
 
 
 engine = create_engine(f"postgresql://{USERNAME}:{PASSWORD}@{IP}:{PORT}/{DBNAME}")
 
 class ProductBase(SQLModel):
     name: str
-    description: Optional[str] = None
     price: float = Field(gt=0)
     content: str
+    picture_key: Optional[str] = None
     category_id: Optional[int] = Field(default=None, foreign_key="categories.id") # Внешний ключ, нужен для сверения айди(наверное)
 
     
@@ -83,6 +110,8 @@ class User(UserBase, table=True):
     id: int = Field(default=None, primary_key=True)
     password_hash: str
 
+    role: Optional["Role"] = Relationship(back_populates="users")
+
 class UserAdd(UserBase):
     password_hash: str
 
@@ -105,6 +134,8 @@ class RoleBase(SQLModel):
 class Role(RoleBase, table=True):
     __tablename__ = "roles"
     id: int = Field(default=None, primary_key=True)
+
+    users: List[User] = Relationship(back_populates="role")
 
 class RoleGet(RoleBase):
     id: int
@@ -143,8 +174,26 @@ def get_params(filter: str | None = "id gt -1", sort: str | None = "id", page: i
             "limit": limit,
             "offset": (page - 1)* (limit or 0)}
 
+
+jwt_dep = Annotated[str, Depends(oauth_form)]
 db_annotation = Annotated[Session, Depends(connect_to_db)]
 url_params = Annotated[Dict[str, str | int], Depends(get_params)]
+
+def get_current_user(db: db_annotation, token: jwt_dep) -> User:
+    creds_exception = HTTPException(detail="Can't validate creditions",
+                                    status_code=status.HTTP_401_UNAUTHORIZED,
+                                    headers={"WWW-Authenticate": "Bearer"})
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+    except InvalidTokenError:
+        raise creds_exception
+    statement = select(User).where(User.name == payload["username"])
+    user = db.exec(statement).first()
+    if user:
+        return user
+    raise creds_exception
+
+user_dep = Annotated[User, Depends(get_current_user)]
 
 @app.get("/products", response_model=List[ProductGet])
 def get_products(db: db_annotation, params: url_params):
@@ -164,6 +213,18 @@ def get_products(db: db_annotation, params: url_params):
         result.append(temp)
     return result
 
+@app.get("/products/link/{id}")
+def get_pic_link(db: db_annotation, id: int):
+    data = db.get(Product, id)
+    link = client.generate_presigned_url("get_object",
+                                            Params={"Bucket": bucket,
+                                                    "Key": data.picture_key},
+                                            ExpiresIn=180)
+    if link:
+        return link
+    raise HTTPException(detail="Key of picture is incorrect", status_code=status.HTTP_404_NOT_FOUND)
+
+
 @app.get("/products/{id}", response_model=ProductGet)
 def get_product(db: db_annotation, id: int):
     data = db.get(Product, id)
@@ -174,8 +235,10 @@ def get_product(db: db_annotation, id: int):
     else:
         raise HTTPException(detail=f"Wrong id {id}, nothing here", status_code=status.HTTP_404_NOT_FOUND)
 
-@app.post("/products", response_model=ProductGet)
-def add_product(value: ProductAdd, db: db_annotation):
+@app.post("/products")
+def add_product(value: ProductAdd, db: db_annotation, current_user: user_dep):
+    if current_user.role.name != "admin":
+        raise HTTPException(detail="Wrong role", status_code=status.HTTP_401_UNAUTHORIZED)
     data = Product(**value.model_dump())
     if data:
         db.add(data)
@@ -184,8 +247,25 @@ def add_product(value: ProductAdd, db: db_annotation):
         return data
     db.rollback()
 
+@app.get("/products/link/post/{key}")
+def get_link_to_post(key: str, db: db_annotation, current_user: user_dep):
+    if current_user.role.name != "admin":
+        raise HTTPException(detail="Wrong role", status_code=status.HTTP_401_UNAUTHORIZED)
+    statement = select(Product).filter(Product.picture_key == key)
+    user = db.exec(statement).first()
+    if user:
+        link = client.generate_presigned_url("put_object",
+                                    Params={"Bucket": bucket,
+                                            "Key": key},
+                                    ExpiresIn=180)
+        return link
+    raise HTTPException(detail=f"Product with key {key} not found!", status_code=status.HTTP_404_NOT_FOUND)
+    
+
 @app.put("/products/{id}", response_model=ProductGet)
-def set_product(id: int, value: ProductSet, db: db_annotation):
+def set_product(id: int, value: ProductSet, db: db_annotation, current_user: user_dep):
+    if current_user.role.name != "admin":
+        raise HTTPException(detail="Wrong role", status_code=status.HTTP_401_UNAUTHORIZED)
     data = db.get(Product, id)
     if data:
         for _i, _v in value.model_dump().items():
@@ -209,7 +289,9 @@ def set_product(id: int, value: ProductSet, db: db_annotation):
         db.rollback()
 
 @app.delete("/products/{id}")
-def delete_product(id: int, db: db_annotation):
+def delete_product(id: int, db: db_annotation, current_user: user_dep):
+    if current_user.role.name != "admin":
+        raise HTTPException(detail="Wrong role", status_code=status.HTTP_401_UNAUTHORIZED)
     data = db.get(Product, id)
     if data:
         db.delete(data)
@@ -249,7 +331,9 @@ def get_category(db: db_annotation, id: int):
     raise HTTPException(detail=f"Category {id} not found!", status_code=status.HTTP_404_NOT_FOUND)
 
 @app.put("/categories/{id}", response_model=CategoryGet)
-def set_category(db: db_annotation, id: int, value: CategorySet):
+def set_category(db: db_annotation, id: int, value: CategorySet, current_user: user_dep):
+    if current_user.role.name != "admin":
+        raise HTTPException(detail="Wrong role", status_code=status.HTTP_401_UNAUTHORIZED)
     data = db.get(Category, id)
     if data:
         for _k, _i in value.model_dump().items():
@@ -271,7 +355,9 @@ def set_category(db: db_annotation, id: int, value: CategorySet):
     db.rollback()
 
 @app.post("/categories", response_model=CategoryGet)
-def add_category(db: db_annotation, value: CategoryAdd):
+def add_category(db: db_annotation, value: CategoryAdd, current_user: user_dep):
+    if current_user.role.name != "admin":
+        raise HTTPException(detail="Wrong role", status_code=status.HTTP_401_UNAUTHORIZED)
     data = Category(**value.model_dump())
     db.add(data)
     db.commit()
@@ -279,7 +365,9 @@ def add_category(db: db_annotation, value: CategoryAdd):
     return data
 
 @app.delete("/categories/{id}")
-def delete_category(db: db_annotation, id: int):
+def delete_category(db: db_annotation, id: int, current_user: user_dep):
+    if current_user.role.name != "admin":
+        raise HTTPException(detail="Wrong role", status_code=status.HTTP_401_UNAUTHORIZED)
     data = db.get(Category, id)
     if data:
         db.delete(data)
@@ -304,7 +392,9 @@ def get_user(db: db_annotation, id: int):
     raise HTTPException(detail=f"User {id} not found!", status_code=status.HTTP_404_NOT_FOUND)
 
 @app.post("/users", response_model=UserGet)
-def add_user(db: db_annotation, value: UserAdd):
+def add_user(db: db_annotation, value: UserAdd, current_user: user_dep):
+    if current_user.role.name != "admin":
+        raise HTTPException(detail="Wrong role", status_code=status.HTTP_401_UNAUTHORIZED)
     try:
         data = {**value.model_dump()}
         passwordandHash = bcrypt.hashpw(data["password_hash"].encode(), bcrypt.gensalt())
@@ -322,13 +412,21 @@ def add_user(db: db_annotation, value: UserAdd):
             raise HTTPException(detail="Error: name of user is repeating!", status_code=status.HTTP_422_UNPROCESSABLE_CONTENT)
     db.rollback()
 
-@app.post("/chpass")
-def checkPassword(db: db_annotation, value: UsersPassword):
-    names = value.model_dump()
-    statement = select(User).where(User.name == names["username"])
+@app.post("/token")
+def checkPassword(db: db_annotation, value: Annotated[OAuth2PasswordRequestForm, Depends()]):
+    names = value
+    statement = select(User).where(User.name == names.username)
     data = db.exec(statement).first()
     if data:
         data = data.model_dump()
-        if bcrypt.checkpw(names["password"].encode(), data["password_hash"].encode()):
-            return True
-    return False
+        token = create_token({"username": data["name"]})
+        if bcrypt.checkpw(names.password.encode(), data["password_hash"].encode()):
+            return {"access_token": token, "token_type": "bearer"}
+    return False    
+
+def create_token(data: dict):
+    to_encode = data.copy()
+    expire = datetime.now(timezone.utc) + timedelta(minutes=15)
+    to_encode["exp"] = expire
+    encoded_jwt = jwt.encode(payload=to_encode, key=SECRET_KEY, algorithm="HS256")
+    return encoded_jwt
