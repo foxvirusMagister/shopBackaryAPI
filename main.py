@@ -31,7 +31,7 @@ PASSWORD = getenv("PASSWORD")
 IP = getenv("IP")
 PORT = getenv("PORT", default="5432")
 DBNAME = getenv("DBNAME")
-ADMIN_ROLE = "admin"
+ADMIN_ROLE = getenv("ADMIN_ROLE")
 
 oauth_form = OAuth2PasswordBearer(tokenUrl="token")
 
@@ -426,7 +426,7 @@ def checkPassword(db: db_annotation, value: Annotated[OAuth2PasswordRequestForm,
 
 def create_token(data: dict):
     to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + timedelta(minutes=15)
+    expire = datetime.now(timezone.utc) + timedelta(minutes=45)
     to_encode["exp"] = expire
     encoded_jwt = jwt.encode(payload=to_encode, key=SECRET_KEY, algorithm="HS256")
     return encoded_jwt
