@@ -331,7 +331,7 @@ def get_category(db: db_annotation, id: int):
         return data
     raise HTTPException(detail=f"Category {id} not found!", status_code=status.HTTP_404_NOT_FOUND)
 
-@app.put("/categories/{id}", response_model=CategoryGet)
+@app.put("/categories/{id}")
 def set_category(db: db_annotation, id: int, value: CategorySet, current_user: user_dep):
     if current_user.role.name != "admin":
         raise HTTPException(detail="Wrong role", status_code=status.HTTP_401_UNAUTHORIZED)
@@ -355,7 +355,7 @@ def set_category(db: db_annotation, id: int, value: CategorySet, current_user: u
         raise HTTPException(detail=f"an error found with request, detail={e}", status_code=status.HTTP_422_UNPROCESSABLE_CONTENT)
     db.rollback()
 
-@app.post("/categories", response_model=CategoryGet)
+@app.post("/categories")
 def add_category(db: db_annotation, value: CategoryAdd, current_user: user_dep):
     if current_user.role.name != "admin":
         raise HTTPException(detail="Wrong role", status_code=status.HTTP_401_UNAUTHORIZED)
