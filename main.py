@@ -58,7 +58,7 @@ class ProductBase(SQLModel):
     name: str
     price: float = Field(gt=0)
     content: str
-    picture_key: Optional[str] = None
+    picture_key: Optional[str] = "default"
     category_id: Optional[int] = Field(default=None, foreign_key="categories.id") # Внешний ключ, нужен для сверения айди(наверное)
 
     
@@ -80,6 +80,7 @@ class ProductSet(ProductBase):
     name: Optional[str] = None
     price: Optional[float] = None
     content: Optional[str] = None
+    picture_key: Optional[str] = None
 
 
 class CategoryBase(SQLModel):
