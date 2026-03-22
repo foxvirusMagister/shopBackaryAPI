@@ -263,7 +263,7 @@ def get_link_to_post(key: str, db: db_annotation, current_user: user_dep):
     raise HTTPException(detail=f"Product with key {key} not found!", status_code=status.HTTP_404_NOT_FOUND)
     
 
-@app.put("/products/{id}", response_model=ProductGet)
+@app.put("/products/{id}")
 def set_product(id: int, value: ProductSet, db: db_annotation, current_user: user_dep):
     if current_user.role.name != "admin":
         raise HTTPException(detail="Wrong role", status_code=status.HTTP_401_UNAUTHORIZED)
